@@ -1,22 +1,26 @@
 #include "bson.hpp"
+#include<iostream>
+using namespace std;
 
-#define UNSIGNED_CHAR_0 static_cast<unsigned char>(0)
-#define UNSIGNED_CHAR_1 static_cast<unsigned char>(1)
-#define UNSIGNED_CHAR_5 static_cast<unsigned char>(5)
+#define DOCUMENT_DEFAULT_SIZE    5
 
-#define END_OF_ENAME        static_cast<unsigned char>(0)
-#define END_OF_DOCUMENT     static_cast<unsigned char>(0)
+#define UNSIGNED_CHAR_0 0x00
+#define UNSIGNED_CHAR_1 0x01
+#define UNSIGNED_CHAR_5 0x05
 
-#define END_OF_STRING       static_cast<unsigned char>(0)//string末尾会有一个0标志结束
-#define BYTE_ARRAY_TYPE     static_cast<unsigned char>(0)//标识byte array的种类，恒为0
+#define END_OF_ENAME        0x00
+#define END_OF_DOCUMENT     0x00
 
-#define TYPE_STRING         static_cast<unsigned char>(2)
-#define TYPE_DOCUMENT       static_cast<unsigned char>(3)
-#define TYPE_ARRAY          static_cast<unsigned char>(4)
-#define TYPE_BYTE_ARRAY     static_cast<unsigned char>(5)
-#define TYPE_BOOL           static_cast<unsigned char>(8)
-#define TYPE_INT32          static_cast<unsigned char>(16)
-#define TYPE_INT64          static_cast<unsigned char>(18)
+#define END_OF_STRING       0x00//string末尾会有一个0标志结束
+#define BYTE_ARRAY_TYPE     0x00//标识byte array的种类，恒为0
+
+#define TYPE_STRING         0x02
+#define TYPE_DOCUMENT       0x03
+#define TYPE_ARRAY          0x04
+#define TYPE_BYTE_ARRAY     0x05
+#define TYPE_BOOL           0x08
+#define TYPE_INT32          0x10
+#define TYPE_INT64          0x12
 
 #define START_OF_DATA_USE_FOR_ELEMENT ptr+elementName.size()+1//用于element中跳过e_name，到达数据
 
@@ -42,11 +46,22 @@
                                     (int64_t)x[6]<<48| \
                                     (int64_t)x[7]<<56
 
-#define AFTER_APPEND(x) \
+#define AFTER_APPEND \
                         do{ \
-                            typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,x)); \
-                            update(); \
+                            memcpy(rawdata,&lenOfrawdata,4); \
                         }while(0)
+
+#define PUSH_ENAME(x) \
+                    do{ \
+                        if(analyzed){ \
+                            typeMap[e_name]=x; \
+                            fields[e_name]=lenOfrawdata; \
+                        } \
+                        memcpy(rawdata+lenOfrawdata,&(e_name[0]),e_name.size()); \
+                        lenOfrawdata+=e_name.size(); \
+                        rawdata[lenOfrawdata]=END_OF_ENAME; \
+                        lenOfrawdata++; \
+                    }while(0)
 
 std::string bson::element::getelementName(){
     return elementName;
@@ -105,7 +120,7 @@ bson::document bson::element::Document(){
     const unsigned char *startOfDocument=START_OF_DATA_USE_FOR_ELEMENT;
     
     int32_t lenOfDocument=TO_INT32_USE_FOR_GENERAL(startOfDocument);
-    res.parseWithSaveData(startOfDocument, lenOfDocument);
+    res.saveDataAndParse(startOfDocument, lenOfDocument,true);
     return res;
 }
 bool bson::element::isArray(){
@@ -122,7 +137,7 @@ bson::document bson::element::Array(){
     }
     const unsigned char *startOfArray=START_OF_DATA_USE_FOR_ELEMENT;
     uint32_t lenOfBinary=TO_INT32_USE_FOR_GENERAL(startOfArray);
-    if(res.parseWithSaveData(startOfArray, lenOfBinary)){
+    if(res.saveDataAndParse(startOfArray, lenOfBinary,true)){
         res.setIsArray(true);
     }
     return res;
@@ -253,7 +268,6 @@ std::string bson::element::toJsonString(){
 }
 
 
-
 bool bson::document::valid(const unsigned char *msgdata){
     int32_t len=TO_INT32_USE_FOR_GENERAL(msgdata);
     //判断首部传入的长度n是否等于数据中自带的长度信息
@@ -267,12 +281,9 @@ bool bson::document::valid(const unsigned char *msgdata){
 
     int32_t index=4;
     int label;
-    std::string e_name;
-    //保存每个字段的起始位置
-    int tmpIndex;
     while(index<len-1){
         //读取每个字段
-        e_name="";
+        //e_name="";
         label=-1;
         label=static_cast<int>(msgdata[index]);
         //如果是不支持的格式
@@ -280,20 +291,16 @@ bool bson::document::valid(const unsigned char *msgdata){
             return false;
         }
         index++;
-        tmpIndex=index;
-        while(index<len-1&&msgdata[index]!=UNSIGNED_CHAR_0){
-            e_name+=static_cast<char>(msgdata[index]);
-            index++;
-        }
-        //记录：e_name,偏移量
-        fields.insert(std::pair<std::string,int>(e_name,tmpIndex));
-        index++;
+        //强行转换
+        std::string e_name((const char*)(msgdata+index));
+        fields[e_name]=index;
+        index+=(e_name.size()+1);
         //通过分析，跳跃至下一个字段token
         //在每个case中，length表示e_name之前标识的该字段总长度
         switch (label) {
             case 2://string=>int32 bytes 0x00
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::STRING));
+                typeMap[e_name]=bson::supportedElementType::STRING;
                 int32_t length=TO_INT32_USE_FOR_VALID(msgdata);
                 if(msgdata[index+3+length]!=UNSIGNED_CHAR_0){
                     return false;
@@ -303,7 +310,7 @@ bool bson::document::valid(const unsigned char *msgdata){
             }
             case 3://embedded document=>int32 ... 0x00
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::EMBEDDED_DOCUMENT));
+                typeMap[e_name]=bson::supportedElementType::EMBEDDED_DOCUMENT;
                 int32_t length=TO_INT32_USE_FOR_VALID(msgdata);
                 if(msgdata[index+length-1]!=UNSIGNED_CHAR_0){
                     return false;
@@ -313,7 +320,7 @@ bool bson::document::valid(const unsigned char *msgdata){
             }
             case 4://array=>int32 ... 0x00
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::ARRAY_DOCUMENT));
+                typeMap[e_name]=bson::supportedElementType::ARRAY_DOCUMENT;
                 int32_t length=TO_INT32_USE_FOR_VALID(msgdata);
                 if(msgdata[index+length-1]!=UNSIGNED_CHAR_0){
                     return false;
@@ -323,14 +330,14 @@ bool bson::document::valid(const unsigned char *msgdata){
             }
             case 5://byte array=>int32 0x00 bytes
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::BYTE_ARRAY));
+                typeMap[e_name]=bson::supportedElementType::BYTE_ARRAY;
                 int32_t length=TO_INT32_USE_FOR_VALID(msgdata);
                 index+=(5+length);
                 break;
             }
             case 8://boolean=>0x01/0x00
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::BOOL));
+                typeMap[e_name]=bson::supportedElementType::BOOL;
                 if(msgdata[index]!=UNSIGNED_CHAR_0&&msgdata[index]!=UNSIGNED_CHAR_1){
                     return false;
                 }
@@ -339,13 +346,13 @@ bool bson::document::valid(const unsigned char *msgdata){
             }
             case 16://int32=>0xYY 0xYY 0xYY 0xYY
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::INT32));
+                typeMap[e_name]=bson::supportedElementType::INT32;
                 index+=4;
                 break;
             }
             case 18://int64=>0xYY 0xYY 0xYY 0xYY 0xYY 0xYY 0xYY 0xYY
             {
-                typeMap.insert(std::pair<std::string,bson::supportedElementType>(e_name,bson::supportedElementType::INT64));
+                typeMap[e_name]=bson::supportedElementType::INT64;
                 index+=8;
                 break;
             }
@@ -357,33 +364,50 @@ bool bson::document::valid(const unsigned char *msgdata){
     }//end of while
     return true;
 }//end of valid
+
+//TODO，分配策略需要改变
+void bson::document::grow(int require){
+    if(lenOfrawdata+require>capacity){
+        int newCapacity=2*capacity;
+        if(newCapacity==0){
+            newCapacity=64;
+        }
+        while(newCapacity<lenOfrawdata+require){
+            newCapacity*=2;
+        }
+        rawdata=static_cast<unsigned char*>(realloc(rawdata, newCapacity+5));
+        capacity=newCapacity;
+    }
+}
 void bson::document::defaultConstruct(){
     fields.clear();
     typeMap.clear();
-    rawdataArr.clear();
     setIsArray(false);
-    rawdataArr.push_back(UNSIGNED_CHAR_5);
-    rawdataArr.push_back(UNSIGNED_CHAR_0);
-    rawdataArr.push_back(UNSIGNED_CHAR_0);
-    rawdataArr.push_back(UNSIGNED_CHAR_0);
-    rawdataArr.push_back(UNSIGNED_CHAR_0);
-    rawdata=&(rawdataArr[0]);
-    lenOfrawdata=5;
+    capacity=0;
+    lenOfrawdata=0;
+    rawdata=nullptr;
+    analyzed=false;
+    
+    //grow将会更新capacity和rawdata
+    grow(DOCUMENT_DEFAULT_SIZE);
+    unsigned char defaultData[DOCUMENT_DEFAULT_SIZE]={UNSIGNED_CHAR_5,UNSIGNED_CHAR_0,UNSIGNED_CHAR_0,UNSIGNED_CHAR_0,UNSIGNED_CHAR_0};
+    memcpy(rawdata,defaultData,DOCUMENT_DEFAULT_SIZE);
+    lenOfrawdata+=DOCUMENT_DEFAULT_SIZE;
+
     judgeParse=true;
 }
 //equal to lenOfrawdata
 int bson::document::size() const{
-    int32_t len=TO_INT32_USE_FOR_GENERAL(rawdata);
-    return static_cast<int>(len);
+    return lenOfrawdata;
 }
 bool bson::document::emptyArray(){
-    if(imArray&&fields.size()==0){
+    if(imArray&&fields.empty()){
         return true;
     }
     return false;
 }
 bool bson::document::isArray(){
-    if(imArray&&max_n()>0){
+    if(imArray){
         return true;
     }
     return false;
@@ -395,42 +419,61 @@ void bson::document::setIsArray(bool boolean){
 bson::document::document(){
     defaultConstruct();
 }
-bson::document::document(const unsigned char *msgdata,int n){
-    parseWithSaveData(msgdata,n);
+bson::document::document(const unsigned char *msgdata,int n,bool needAnalysis){
+    //needAnalysis将会控制是否进行parse
+    saveDataAndParse(msgdata,n,needAnalysis);
 }
+//修改拷贝构造函数时，需要注意：grow会参考并更改capacity，不会影响lenOfrawdata
 bson::document::document(const document& doc){
     fields.clear();
     typeMap.clear();
-    rawdataArr.clear();
     imArray=doc.imArray;
     fields=doc.fields;
     typeMap=doc.typeMap;
     judgeParse=doc.judgeParse;
+    rawdata=nullptr;
+    analyzed=doc.analyzed;
     lenOfrawdata=0;
-
-    addData(doc.rawdata,doc.lenOfrawdata);
+    capacity=0;
+    grow(doc.capacity);
+    memcpy(rawdata,doc.rawdata,doc.lenOfrawdata);
+    lenOfrawdata=doc.lenOfrawdata;
 }
 bson::document::document(document&& doc){
+    analyzed=std::move(doc.analyzed);
     imArray=std::move(doc.imArray);
     fields=std::move(doc.fields);
     typeMap=std::move(doc.typeMap);
     judgeParse=std::move(doc.judgeParse);
-    rawdataArr=std::move(doc.rawdataArr);
-    rawdata=&(rawdataArr[0]);
     lenOfrawdata=std::move(doc.lenOfrawdata);
+    capacity=std::move(doc.capacity);
+    rawdata=std::move(doc.rawdata);
+    doc.rawdata=nullptr;
 }
-bool bson::document::parseWithSaveData(const unsigned char *msgdata,int n){
+bool bson::document::saveDataAndParse(const unsigned char *msgdata,int n,bool needAnalysis){
+    fields.clear();
+    typeMap.clear();
+    setIsArray(false);
+    capacity=0;
+    lenOfrawdata=0;
+    rawdata=nullptr;
+    grow(n);
+
     if(n<=0){
         judgeParse=false;
         return false;
     }
-    lenOfrawdata=0;
-    addData(msgdata,n);
-    if(valid(rawdata)){
+    memcpy(rawdata,msgdata,n);
+    lenOfrawdata=n;
+    
+    if(needAnalysis&&valid(rawdata)){
         judgeParse=true;
     }else{
         judgeParse=false;
     }
+
+    analyzed=needAnalysis;
+
     return judgeParse;
 }
 bool bson::document::hasField(std::string field_name) const{
@@ -438,6 +481,18 @@ bool bson::document::hasField(std::string field_name) const{
         return false;
     }
     return true;
+}
+bool bson::document::getAnalyzed(){
+    return analyzed;
+}
+void bson::document::analyze(){
+    if(!analyzed){
+        if(valid(rawdata)){
+            judgeParse=true;
+        }else{
+            judgeParse=false;
+        }
+    }
 }
 bson::element bson::document::operator[](std::string field_name) const{
     auto get_element=fields.find(field_name);
@@ -456,8 +511,8 @@ int bson::document::max_n() {
     }
     int n=0;
     int tmp=-1;
-    for(std::map<std::string,int>::iterator iter=fields.begin();iter!=fields.end();iter++){
-        tmp=atoi((iter->first).c_str());
+    for(auto &iter:fields){
+        tmp=atoi((iter.first).c_str());
         n=n>tmp?n:tmp;
     }
     return n;
@@ -466,6 +521,7 @@ bool bson::document::isDocument() const{
     return judgeParse;
 }
 std::string bson::document::toJsonString() {
+    analyze();
     if(!judgeParse){
         return "";
     }
@@ -485,193 +541,172 @@ std::string bson::document::toJsonString() {
     
     int counter=0;
     std::string res="{";
-    for(std::map<std::string,int>::iterator iter=fields.begin();iter!=fields.end();iter++){
+    for(auto &iter:fields){
         if(counter!=0){
             res+=",";
         }else{
             counter++;
         }
         res+="\"";
-        res+=iter->first;
+        res+=iter.first;
         res+="\":";
-        bson::element tmp=this->operator[](iter->first);
+        bson::element tmp=this->operator[](iter.first);
         res+=tmp.toJsonString();
     }
     res+="}";
     return res;
 }
 void bson::document::append(std::string e_name,std::string value){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+value.size()+7);//-1+1+e_name.size()+1+4+value.size()+1+1
-    rawdataArr.push_back(TYPE_STRING);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
+    grow(static_cast<int>(e_name.size()+value.size()+7));//-1+1+e_name.size()+1+4+value.size()+1+1
+    
+    //push type string
+    rawdata[lenOfrawdata-1]=TYPE_STRING;
+    
+    PUSH_ENAME(bson::supportedElementType::STRING);
 
-    unsigned char arr[4];
+    //push value:length of value
     int32_t lenOfString=static_cast<int32_t>(value.size()+1);
-    memcpy(arr,&lenOfString,4);
-    for(int i=0;i<4;i++){
-        rawdataArr.push_back(arr[i]);
-    }
+    memcpy(rawdata+lenOfrawdata,&lenOfString,4);
+    lenOfrawdata+=4;
+    
+    //push value:value's data
+    memcpy(rawdata+lenOfrawdata,&value[0],value.size());
+    lenOfrawdata+=value.size();
 
-    for(size_t i=0;i<value.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(value[i]));
-    }
-    rawdataArr.push_back(END_OF_STRING);
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    //push value:end of value
+    rawdata[lenOfrawdata]=END_OF_STRING;
+    lenOfrawdata++;
 
-    AFTER_APPEND(bson::supportedElementType::STRING);
+    //push end of document
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+    
+    //更新首部长度
+    AFTER_APPEND;
 }
 void bson::document::append(std::string e_name,const char *value){
-    rawdataArr.pop_back();
     int valueSize=0;
     while(value[valueSize]!='\0'){
         valueSize++;
     }
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+valueSize+7);//-1+1+e_name.size()+1+4+valueSize+1+1
-    rawdataArr.push_back(TYPE_STRING);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
 
-    unsigned char arr[4];
+    grow(static_cast<int>(e_name.size()+valueSize+7));//-1+1+e_name.size()+1+4+valueSize+1+1
+    
+    rawdata[lenOfrawdata-1]=TYPE_STRING;
+
+    PUSH_ENAME(bson::supportedElementType::STRING);
+
     int32_t lenOfString=static_cast<int32_t>(valueSize+1);
-    memcpy(arr,&lenOfString,4);
-    for(int i=0;i<4;i++){
-        rawdataArr.push_back(arr[i]);
-    }
+    memcpy(rawdata+lenOfrawdata,&lenOfString,4);
+    lenOfrawdata+=4;
 
-    for(int i=0;i<valueSize;i++){
-        rawdataArr.push_back(static_cast<unsigned char>(value[i]));
-    }
-    rawdataArr.push_back(END_OF_STRING);
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    memcpy(rawdata+lenOfrawdata,value,valueSize);
+    lenOfrawdata+=valueSize;
 
-    AFTER_APPEND(bson::supportedElementType::STRING);
+    rawdata[lenOfrawdata]=END_OF_STRING;
+    lenOfrawdata++;
+
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
 void bson::document::append(std::string e_name,document& doc){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+doc.size()+2);//-1+1+e_name.size()+1+doc.size()+1
-    rawdataArr.push_back(TYPE_DOCUMENT);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
+    grow(static_cast<int>(e_name.size()+doc.size()+2));//-1+1+e_name.size()+1+doc.size()+1
 
-    for(int i=0;i<doc.size();i++){
-        rawdataArr.push_back(doc.rawdata[i]);
-    }
-    rawdataArr.push_back(END_OF_DOCUMENT);
-
+    rawdata[lenOfrawdata-1]=TYPE_DOCUMENT;
+    
     if(doc.isArray()){
-        AFTER_APPEND(bson::supportedElementType::ARRAY_DOCUMENT);
+        PUSH_ENAME(bson::supportedElementType::ARRAY_DOCUMENT);
     }else{
-        AFTER_APPEND(bson::supportedElementType::EMBEDDED_DOCUMENT);
+        PUSH_ENAME(bson::supportedElementType::EMBEDDED_DOCUMENT);
     }
+
+    //push doc's data
+    memcpy(rawdata+lenOfrawdata,doc.rawdata,doc.lenOfrawdata);
+    lenOfrawdata+=doc.lenOfrawdata;
+
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
 void bson::document::append(std::string e_name,unsigned char *binary,int n){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+n+7);//-1+1+ename.size()+1+4+1+n+1
-    rawdataArr.push_back(TYPE_BYTE_ARRAY);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
-    
-    unsigned char arr[4];
-    int32_t tmp=static_cast<int32_t>(n);
-    memcpy(arr, &tmp, 4);
-    for(int i=0;i<4;i++){
-        rawdataArr.push_back(arr[i]);
-    }
-    rawdataArr.push_back(BYTE_ARRAY_TYPE);
-    update();
-    
-    addData(binary,n);
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    grow(static_cast<int>(e_name.size()+n+7));//-1+1+ename.size()+1+4+1+n+1
 
-    AFTER_APPEND(bson::supportedElementType::BYTE_ARRAY);
+    rawdata[lenOfrawdata-1]=TYPE_BYTE_ARRAY;
+
+    PUSH_ENAME(bson::supportedElementType::BYTE_ARRAY);
+    
+    //push length of byte array
+    memcpy(rawdata+lenOfrawdata,&n,4);
+    lenOfrawdata+=4;
+
+    //push type of byte array
+    rawdata[lenOfrawdata]=BYTE_ARRAY_TYPE;
+    lenOfrawdata++;
+
+    //push byte array
+    memcpy(rawdata+lenOfrawdata,binary,n);
+    lenOfrawdata+=n;
+
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
 void bson::document::append(std::string e_name,bool boolean){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+2);//-1+1+ename.size()+1+1
-    rawdataArr.push_back(TYPE_BOOL);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
+    grow(static_cast<int>(e_name.size()+2));//-1+1+ename.size()+1+1
 
+    rawdata[lenOfrawdata-1]=TYPE_BOOL;
+    
+    PUSH_ENAME(bson::supportedElementType::BOOL);
+
+    //push bool
     if(boolean){
-        rawdataArr.push_back(UNSIGNED_CHAR_1);
+        rawdata[lenOfrawdata]=UNSIGNED_CHAR_1;
     }else{
-        rawdataArr.push_back(UNSIGNED_CHAR_0);
+        rawdata[lenOfrawdata]=UNSIGNED_CHAR_0;
     }
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    lenOfrawdata++;
 
-    AFTER_APPEND(bson::supportedElementType::BOOL);
+    //push end of document
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
 void bson::document::appendInt32(std::string e_name,int32_t value){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+6);//-1+1+ename.size()+1+4+1
-    rawdataArr.push_back(TYPE_INT32);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
+    grow(static_cast<int>(e_name.size()+6));//-1+1+ename.size()+1+4+1
 
-    unsigned char arr[4];
-    memcpy(arr,&value,4);
-    for(int i=0;i<4;i++){
-        rawdataArr.push_back(arr[i]);
-    }
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    rawdata[lenOfrawdata-1]=TYPE_INT32;
 
-    AFTER_APPEND(bson::supportedElementType::INT32);
+    PUSH_ENAME(bson::supportedElementType::INT32);
+
+    memcpy(rawdata+lenOfrawdata,&value,4);
+    lenOfrawdata+=4;
+
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
 void bson::document::appendInt64(std::string e_name,int64_t value){
-    rawdataArr.pop_back();
-    rawdataArr.reserve(rawdataArr.size()+e_name.size()+10);//-1+1+ename.size()+1+8+1
-    rawdataArr.push_back(TYPE_INT64);
-    fields.insert(std::pair<std::string,int>(e_name,static_cast<int>(rawdataArr.size())));
-    for(size_t i=0;i<e_name.size();i++){
-        rawdataArr.push_back(static_cast<unsigned char>(e_name[i]));
-    }
-    rawdataArr.push_back(END_OF_ENAME);
+    grow(static_cast<int>(e_name.size()+10));//-1+1+ename.size()+1+8+1
 
-    unsigned char arr[8];
-    memcpy(arr,&value,8);
-    for(int i=0;i<8;i++){
-        rawdataArr.push_back(arr[i]);
-    }
-    rawdataArr.push_back(END_OF_DOCUMENT);
+    rawdata[lenOfrawdata-1]=TYPE_INT64;
 
-    AFTER_APPEND(bson::supportedElementType::INT64);
+    PUSH_ENAME(bson::supportedElementType::INT64);
+
+    memcpy(rawdata+lenOfrawdata,&value,8);
+    lenOfrawdata+=8;
+
+    rawdata[lenOfrawdata]=END_OF_DOCUMENT;
+    lenOfrawdata++;
+
+    AFTER_APPEND;
 }
-void bson::document::update(){
-    lenOfrawdata=static_cast<int>(rawdataArr.size());
-    rawdata=&(rawdataArr[0]);
 
-    unsigned char arr[4];
-    int32_t tmp=lenOfrawdata;
-    memcpy(arr,&tmp,4);
-    for(int i=0;i<4;i++){
-        rawdataArr[i]=arr[i];
-    }
-}
-void bson::document::addData(const unsigned char *to_append,int n){
-    rawdataArr.reserve(lenOfrawdata+n+10);
-    //更新rawdataArr.size()
-    rawdataArr.resize(lenOfrawdata+n);
-    memcpy(&(rawdataArr[lenOfrawdata]),to_append,n);
-    rawdata=&(rawdataArr[0]);
-    lenOfrawdata+=n;
+bson::document::~document(){
+    delete[] rawdata;
 }
