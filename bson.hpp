@@ -30,7 +30,7 @@ namespace bson{
         false,//128bit decimal floating point
     };
     //supportArray大小
-    static const int N=sizeof(supportArray)/sizeof(bool);
+    static const int N=18;
     //为支持的类型进行枚举,NO_SET用于和判定生成无效element
     enum supportedElementType {STRING,EMBEDDED_DOCUMENT,ARRAY_DOCUMENT,BYTE_ARRAY,BOOL,INT32,INT64,NO_SET};
 
@@ -82,39 +82,42 @@ namespace bson{
     private:
         bool valid(const unsigned char *msgdata);
         int lenOfrawdata;//保存rawdataArr中数据的长度
+        int capacity;
         bool imArray;
-        std::vector<unsigned char> rawdataArr;
-        std::map<std::string,int> fields;
-        std::map<std::string,supportedElementType> typeMap;
+        std::map<std::string, int> fields;
+        std::map<std::string, supportedElementType> typeMap;
+        bool analyzed;
     public:
         bool judgeParse;
         unsigned char* rawdata;
 
-        document();//默认情况为5,0,0,0,0
-        document(const unsigned char *msgdata,int n);//将会保存数据
+        document();//默认情况为5,0,0,0,0，且不分析字段
+        document(const unsigned char *msgdata,int n,bool needAnalysis);//将会保存数据，可控制是否分析字段
         document(const document& doc);
         document(document&& doc);
+        ~document();
 
         void defaultConstruct();//初始化七个变量
         int size() const;
+        bool getAnalyzed();
+        void analyze();
         bool emptyArray();
         bool isArray();
         void setIsArray(bool boolean);
-        bool parseWithSaveData(const unsigned char *msgdata,int n);
+        bool saveDataAndParse(const unsigned char *msgdata,int n,bool needAnalysis);
         bool hasField(std::string field_name) const;
         element operator[](std::string field_name) const;
         int max_n();//返回数组的长度
         bool isDocument() const;
         std::string toJsonString();
         void append(std::string e_name,std::string value);
-        void append(std::string e_name,const char *value);
+        void append(std::string e_name,const char *value);//support the format: append("qiniu","com");
         void append(std::string e_name,document& doc);
         void append(std::string e_name,unsigned char *binary,int n);
         void append(std::string e_name,bool boolean);
         void appendInt32(std::string e_name,int32_t value);
         void appendInt64(std::string e_name,int64_t value);
-        void update();//可连续多次调用；在下次使用lenOfrawdata（一般是append里面的最后）之前必须调用
-        void addData(const unsigned char *to_append,int n);//添加大量数据时使用；其他情况请对rawdataArr进行push_back之后调用update来更新lenOfrawdata和rawdata
+        void grow(int n);
     };
 }
 #endif
